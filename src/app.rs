@@ -5,9 +5,20 @@ use std::io;
 use std::path::Path;
 use std::sync::mpsc;
 use std::time;
+
+const DURATION_PRESETS: [u64; 11] = [2, 3, 4, 5, 10, 15, 20, 25, 30, 45, 60];
+
 enum Event {
     Key(event::KeyEvent),
     Tick,
+}
+
+#[derive(Debug, PartialEq)]
+enum MenuState {
+    None,
+    MainMenu,
+    SelectWorkDuration,
+    SelectBreakDuration,
 }
 
 pub struct App {
@@ -16,6 +27,8 @@ pub struct App {
     tx: mpsc::Sender<Event>,
     rx: mpsc::Receiver<Event>,
     hide_image: bool,
+    menu_state: MenuState,
+    menu_selection: usize,
 }
 
 impl App {
@@ -38,6 +51,8 @@ impl App {
             tx,
             rx,
             hide_image,
+            menu_state: MenuState::None,
+            menu_selection: 0,
         }
     }
 
@@ -109,6 +124,11 @@ impl App {
         let (work_timer, break_timer) = self.get_timer_widgets(work_pixel, break_pixel);
         frame.render_widget(work_timer, rtop);
         frame.render_widget(break_timer, rbottom);
+
+        // Render menu overlay if menu is active
+        if self.menu_state != MenuState::None {
+            self.render_menu(frame, area);
+        }
     }
 
     fn get_layout(
@@ -154,6 +174,8 @@ impl App {
             "<S>".blue().bold(),
             " Reset ".into(),
             "<R>".blue().bold(),
+            " Configure ".into(),
+            "<C>".blue().bold(),
             " Quit ".into(),
             "<Q/Esc> ".blue().bold(),
         ]);
@@ -194,16 +216,188 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key_event: event::KeyEvent) {
+        if self.menu_state != MenuState::None {
+            // Handle menu navigation
+            self.handle_menu_key_event(key_event);
+        } else {
+            // Handle normal app keys
+            match key_event.code {
+                event::KeyCode::Char('s') => {
+                    self.pomo.start_or_pause();
+                }
+                event::KeyCode::Char('r') => {
+                    self.pomo.reset();
+                }
+                event::KeyCode::Char('c') => {
+                    self.menu_state = MenuState::MainMenu;
+                    self.menu_selection = 0;
+                }
+                event::KeyCode::Esc => self.exit = true,
+                event::KeyCode::Char('q') => self.exit = true,
+                _ => (),
+            }
+        }
+    }
+
+    fn handle_menu_key_event(&mut self, key_event: event::KeyEvent) {
         match key_event.code {
-            event::KeyCode::Char('s') => {
-                self.pomo.start_or_pause();
+            event::KeyCode::Up => {
+                if self.menu_selection > 0 {
+                    self.menu_selection -= 1;
+                }
             }
-            event::KeyCode::Char('r') => {
-                self.pomo.reset();
+            event::KeyCode::Down => {
+                let max_items = match self.menu_state {
+                    MenuState::MainMenu => 3, // 4 items (0-3)
+                    MenuState::SelectWorkDuration | MenuState::SelectBreakDuration => {
+                        DURATION_PRESETS.len() - 1
+                    }
+                    MenuState::None => 0,
+                };
+                if self.menu_selection < max_items {
+                    self.menu_selection += 1;
+                }
             }
-            event::KeyCode::Esc => self.exit = true,
-            event::KeyCode::Char('q') => self.exit = true,
+            event::KeyCode::Enter => {
+                self.handle_menu_selection();
+            }
+            event::KeyCode::Esc => {
+                // Go back or close menu
+                match self.menu_state {
+                    MenuState::MainMenu => {
+                        self.menu_state = MenuState::None;
+                    }
+                    MenuState::SelectWorkDuration | MenuState::SelectBreakDuration => {
+                        self.menu_state = MenuState::MainMenu;
+                        self.menu_selection = 0;
+                    }
+                    MenuState::None => {}
+                }
+            }
             _ => (),
         }
+    }
+
+    fn handle_menu_selection(&mut self) {
+        match self.menu_state {
+            MenuState::MainMenu => {
+                match self.menu_selection {
+                    0 => {
+                        // Change Work Duration
+                        self.menu_state = MenuState::SelectWorkDuration;
+                        self.menu_selection = 0;
+                    }
+                    1 => {
+                        // Change Break Duration
+                        self.menu_state = MenuState::SelectBreakDuration;
+                        self.menu_selection = 0;
+                    }
+                    2 => {
+                        // Toggle Auto-Start
+                        self.pomo.toggle_auto_start();
+                        // Stay in menu to show updated state
+                    }
+                    3 => {
+                        // Back
+                        self.menu_state = MenuState::None;
+                    }
+                    _ => {}
+                }
+            }
+            MenuState::SelectWorkDuration => {
+                if self.menu_selection < DURATION_PRESETS.len() {
+                    let duration = DURATION_PRESETS[self.menu_selection];
+                    self.pomo.set_work_duration(duration);
+                    self.menu_state = MenuState::MainMenu;
+                    self.menu_selection = 0;
+                }
+            }
+            MenuState::SelectBreakDuration => {
+                if self.menu_selection < DURATION_PRESETS.len() {
+                    let duration = DURATION_PRESETS[self.menu_selection];
+                    self.pomo.set_break_duration(duration);
+                    self.menu_state = MenuState::MainMenu;
+                    self.menu_selection = 0;
+                }
+            }
+            MenuState::None => {}
+        }
+    }
+
+    fn render_menu(&self, frame: &mut Frame, area: layout::Rect) {
+        // Create centered popup area
+        let popup_area = self.centered_rect(60, 60, area);
+
+        // Clear the background
+        frame.render_widget(widgets::Clear, popup_area);
+
+        match self.menu_state {
+            MenuState::MainMenu => {
+                let auto_start_status = if self.pomo.auto_start() { "ON" } else { "OFF" };
+                let auto_start_label = format!("Toggle Auto-Start ({})", auto_start_status);
+                let items = vec![
+                    "Change Work Duration",
+                    "Change Break Duration",
+                    &auto_start_label,
+                    "Back",
+                ];
+                self.render_menu_items(frame, popup_area, "Configuration Menu", &items);
+            }
+            MenuState::SelectWorkDuration | MenuState::SelectBreakDuration => {
+                let title = match self.menu_state {
+                    MenuState::SelectWorkDuration => "Select Work Duration (minutes)",
+                    MenuState::SelectBreakDuration => "Select Break Duration (minutes)",
+                    _ => "",
+                };
+                let items: Vec<String> = DURATION_PRESETS
+                    .iter()
+                    .map(|d| format!("{} minutes", d))
+                    .collect();
+                let items_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+                self.render_menu_items(frame, popup_area, title, &items_refs);
+            }
+            MenuState::None => {}
+        }
+    }
+
+    fn render_menu_items(&self, frame: &mut Frame, area: layout::Rect, title: &str, items: &[&str]) {
+        let block = widgets::Block::bordered()
+            .title(text::Line::from(title).centered())
+            .border_set(symbols::border::THICK);
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let list_items: Vec<widgets::ListItem> = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let content = if i == self.menu_selection {
+                    text::Line::from(format!("> {}", item)).yellow().bold()
+                } else {
+                    text::Line::from(format!("  {}", item))
+                };
+                widgets::ListItem::new(content)
+            })
+            .collect();
+
+        let list = widgets::List::new(list_items);
+        frame.render_widget(list, inner);
+    }
+
+    fn centered_rect(&self, percent_x: u16, percent_y: u16, area: layout::Rect) -> layout::Rect {
+        let popup_layout = layout::Layout::vertical([
+            layout::Constraint::Percentage((100 - percent_y) / 2),
+            layout::Constraint::Percentage(percent_y),
+            layout::Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+        layout::Layout::horizontal([
+            layout::Constraint::Percentage((100 - percent_x) / 2),
+            layout::Constraint::Percentage(percent_x),
+            layout::Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
     }
 }

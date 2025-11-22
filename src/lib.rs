@@ -58,6 +58,10 @@ impl Timer {
         }
         self.duration - self.elapsed()
     }
+
+    fn set_duration(&mut self, minutes: u64) {
+        self.duration = time::Duration::from_secs(minutes * 60);
+    }
 }
 
 impl fmt::Display for Timer {
@@ -80,6 +84,7 @@ pub struct Pomodoro {
     state: PomodoroState,
     sound: PathBuf,
     no_sound: bool,
+    auto_start: bool,
 }
 
 impl Pomodoro {
@@ -95,6 +100,7 @@ impl Pomodoro {
             state: PomodoroState::Work,
             sound,
             no_sound,
+            auto_start: true,
         }
     }
 
@@ -134,6 +140,22 @@ impl Pomodoro {
         self.state = PomodoroState::Work;
     }
 
+    pub fn set_work_duration(&mut self, minutes: u64) {
+        self.work_timer.set_duration(minutes);
+    }
+
+    pub fn set_break_duration(&mut self, minutes: u64) {
+        self.break_timer.set_duration(minutes);
+    }
+
+    pub fn toggle_auto_start(&mut self) {
+        self.auto_start = !self.auto_start;
+    }
+
+    pub fn auto_start(&self) -> bool {
+        self.auto_start
+    }
+
     pub fn check_and_switch(&mut self) {
         let (current_timer, next_timer, next_state, message) = match self.state {
             PomodoroState::Work => (
@@ -152,7 +174,9 @@ impl Pomodoro {
 
         if current_timer.remaining() == time::Duration::from_secs(0) {
             current_timer.reset();
-            next_timer.start_or_pause();
+            if self.auto_start {
+                next_timer.start_or_pause();
+            }
             self.state = next_state;
             show_notification("Pomodoro Timer", message, &self.sound, &self.no_sound);
         }
