@@ -11,6 +11,70 @@ use rodio::Decoder;
 use rodio::OutputStream;
 use rodio::Source;
 
+pub struct CountUpTimer {
+    max_duration: time::Duration,
+    start_time: Option<time::Instant>,
+    elapsed: time::Duration,
+    is_running: bool,
+}
+
+impl CountUpTimer {
+    pub fn new(max_minutes: u64) -> Self {
+        CountUpTimer {
+            max_duration: time::Duration::from_secs(max_minutes * 60),
+            start_time: None,
+            elapsed: time::Duration::from_secs(0),
+            is_running: false,
+        }
+    }
+
+    pub fn start_or_pause(&mut self) {
+        if self.is_running {
+            self.elapsed = self.elapsed();
+            self.start_time = None;
+        } else {
+            self.start_time = Some(time::Instant::now());
+        }
+        self.is_running = !self.is_running;
+    }
+
+    pub fn reset(&mut self) {
+        self.start_time = None;
+        self.elapsed = time::Duration::from_secs(0);
+        self.is_running = false;
+    }
+
+    pub fn elapsed(&self) -> time::Duration {
+        let current_elapsed = match self.start_time {
+            Some(start_time) => self.elapsed + start_time.elapsed(),
+            None => self.elapsed,
+        };
+
+        // Cap at max duration
+        if current_elapsed > self.max_duration {
+            self.max_duration
+        } else {
+            current_elapsed
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.elapsed() >= self.max_duration
+    }
+}
+
+impl fmt::Display for CountUpTimer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let elapsed = self.elapsed();
+        let (minutes, seconds) = get_min_sec_from_duration(elapsed);
+        write!(f, "{:02}:{:02}", minutes, seconds)
+    }
+}
+
 struct Timer {
     duration: time::Duration,
     start_time: Option<time::Instant>,
@@ -100,7 +164,7 @@ impl Pomodoro {
             state: PomodoroState::Work,
             sound,
             no_sound,
-            auto_start: true,
+            auto_start: false,
         }
     }
 
@@ -169,6 +233,20 @@ impl Pomodoro {
 
     pub fn set_sound(&mut self, sound_path: PathBuf) {
         self.sound = sound_path;
+    }
+
+    pub fn reset_break_timer(&mut self) {
+        self.break_timer.reset();
+    }
+
+    pub fn start_break_timer(&mut self) {
+        if !self.break_timer.is_running {
+            self.break_timer.start_or_pause();
+        }
+    }
+
+    pub fn is_break_timer_complete(&self) -> bool {
+        self.break_timer.remaining() == time::Duration::from_secs(0)
     }
 
     pub fn check_and_switch(&mut self) -> bool {

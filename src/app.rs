@@ -24,8 +24,24 @@ enum MenuState {
     SelectSound,
 }
 
+#[derive(Debug, PartialEq)]
+enum AppMode {
+    Pomodoro,
+    CountUpTimer,
+}
+
+#[derive(Debug, PartialEq)]
+enum CountUpState {
+    Work,
+    Break,
+}
+
 pub struct App {
     pomo: pomodoro_tui::Pomodoro,
+    count_up_timer: pomodoro_tui::CountUpTimer,
+    count_up_break_timer: pomodoro_tui::CountUpTimer,
+    count_up_state: CountUpState,
+    mode: AppMode,
     exit: bool,
     tx: mpsc::Sender<Event>,
     rx: mpsc::Receiver<Event>,
@@ -50,6 +66,10 @@ impl App {
                 sound.to_path_buf(),
                 no_sound,
             ),
+            count_up_timer: pomodoro_tui::CountUpTimer::new(120),
+            count_up_break_timer: pomodoro_tui::CountUpTimer::new(120),
+            count_up_state: CountUpState::Work,
+            mode: AppMode::Pomodoro,
             exit: false,
             tx,
             rx,
@@ -65,10 +85,25 @@ impl App {
             match self.rx.recv() {
                 Ok(Event::Key(key_event)) => self.handle_key_event(key_event),
                 Ok(Event::Tick) => {
-                    let work_session_ended = self.pomo.check_and_switch();
-                    if work_session_ended {
-                        self.menu_state = MenuState::ExtendWorkSession;
-                        self.menu_selection = 0;
+                    match self.mode {
+                        AppMode::Pomodoro => {
+                            let work_session_ended = self.pomo.check_and_switch();
+                            if work_session_ended {
+                                self.menu_state = MenuState::ExtendWorkSession;
+                                self.menu_selection = 0;
+                            }
+                        }
+                        AppMode::CountUpTimer => {
+                            // Auto-pause work timer when reaching max duration
+                            if self.count_up_timer.is_complete() && self.count_up_timer.is_running() {
+                                self.count_up_timer.start_or_pause();
+                            }
+
+                            // Auto-pause break timer when reaching max duration
+                            if self.count_up_break_timer.is_complete() && self.count_up_break_timer.is_running() {
+                                self.count_up_break_timer.start_or_pause();
+                            }
+                        }
                     }
                 }
                 _ => (),
@@ -99,40 +134,111 @@ impl App {
     }
 
     pub fn start_or_pause(&mut self) {
-        self.pomo.start_or_pause();
+        match self.mode {
+            AppMode::Pomodoro => self.pomo.start_or_pause(),
+            AppMode::CountUpTimer => {
+                match self.count_up_state {
+                    CountUpState::Work => {
+                        let was_running = self.count_up_timer.is_running();
+                        self.count_up_timer.start_or_pause();
+
+                        // If we just paused the work timer, switch to break and start it
+                        if was_running && !self.count_up_timer.is_running() {
+                            self.count_up_state = CountUpState::Break;
+                            self.count_up_break_timer.reset();
+                            self.count_up_break_timer.start_or_pause();
+                        }
+                    }
+                    CountUpState::Break => {
+                        let was_running = self.count_up_break_timer.is_running();
+                        self.count_up_break_timer.start_or_pause();
+
+                        // If we just paused the break timer, switch back to work (but don't start)
+                        if was_running && !self.count_up_break_timer.is_running() {
+                            self.count_up_state = CountUpState::Work;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn draw(&self, frame: &mut Frame) {
-        let (work_size, work_pixel, break_size, break_pixel) = match self.pomo.state() {
-            pomodoro_tui::PomodoroState::Work => (
-                8,
-                tui_big_text::PixelSize::Full,
-                4,
-                tui_big_text::PixelSize::Quadrant,
-            ),
-            pomodoro_tui::PomodoroState::Break => (
-                4,
-                tui_big_text::PixelSize::Quadrant,
-                8,
-                tui_big_text::PixelSize::Full,
-            ),
-        };
-
         let area = frame.area();
-
         let block = self.get_block_widget();
         frame.render_widget(block, area);
 
-        let (lcenter, rtop, rbottom) = self.get_layout(area, work_size, break_size);
+        match self.mode {
+            AppMode::Pomodoro => {
+                let (work_size, work_pixel, break_size, break_pixel) = match self.pomo.state() {
+                    pomodoro_tui::PomodoroState::Work => (
+                        8,
+                        tui_big_text::PixelSize::Full,
+                        4,
+                        tui_big_text::PixelSize::Quadrant,
+                    ),
+                    pomodoro_tui::PomodoroState::Break => (
+                        4,
+                        tui_big_text::PixelSize::Quadrant,
+                        8,
+                        tui_big_text::PixelSize::Full,
+                    ),
+                };
 
-        if !self.hide_image {
-            let ascii_img = self.get_ascii_image_widget();
-            frame.render_widget(ascii_img, lcenter);
+                let (lcenter, rtop, rbottom) = self.get_layout(area, work_size, break_size);
+
+                if !self.hide_image {
+                    let ascii_img = self.get_ascii_image_widget();
+                    frame.render_widget(ascii_img, lcenter);
+                }
+
+                let (work_timer, break_timer) = self.get_timer_widgets(work_pixel, break_pixel);
+                frame.render_widget(work_timer, rtop);
+                frame.render_widget(break_timer, rbottom);
+            }
+            AppMode::CountUpTimer => {
+                // Layout similar to Pomodoro mode with ASCII art
+                let (work_size, work_pixel, break_size, break_pixel) = match self.count_up_state {
+                    CountUpState::Work => (
+                        8,
+                        tui_big_text::PixelSize::Full,
+                        4,
+                        tui_big_text::PixelSize::Quadrant,
+                    ),
+                    CountUpState::Break => (
+                        4,
+                        tui_big_text::PixelSize::Quadrant,
+                        8,
+                        tui_big_text::PixelSize::Full,
+                    ),
+                };
+
+                let (lcenter, rtop, rbottom) = self.get_layout(area, work_size, break_size);
+
+                if !self.hide_image {
+                    let ascii_img = self.get_ascii_image_widget();
+                    frame.render_widget(ascii_img, lcenter);
+                }
+
+                // Count-up work timer on top
+                let timer_text = self.count_up_timer.to_string();
+                let timer_widget = tui_big_text::BigText::builder()
+                    .pixel_size(work_pixel)
+                    .lines(vec![timer_text.cyan().into()])
+                    .centered()
+                    .build();
+                frame.render_widget(timer_widget, rtop);
+
+                // Count-up break timer on bottom
+                let break_timer_text = self.count_up_break_timer.to_string();
+                let break_widget = tui_big_text::BigText::builder()
+                    .pixel_size(break_pixel)
+                    .lines(vec![break_timer_text.green().into()])
+                    .centered()
+                    .build();
+                frame.render_widget(break_widget, rbottom);
+            }
         }
-
-        let (work_timer, break_timer) = self.get_timer_widgets(work_pixel, break_pixel);
-        frame.render_widget(work_timer, rtop);
-        frame.render_widget(break_timer, rbottom);
 
         // Render menu overlay if menu is active
         if self.menu_state != MenuState::None {
@@ -172,12 +278,25 @@ impl App {
     }
 
     fn get_block_widget(&self) -> widgets::Block<'_> {
-        let start_pause = match self.pomo.is_running() {
+        let is_running = match self.mode {
+            AppMode::Pomodoro => self.pomo.is_running(),
+            AppMode::CountUpTimer => match self.count_up_state {
+                CountUpState::Work => self.count_up_timer.is_running(),
+                CountUpState::Break => self.count_up_break_timer.is_running(),
+            },
+        };
+
+        let start_pause = match is_running {
             true => "Pause ",
             false => "Start ",
         };
 
-        let title = text::Line::from(" Pomodoro ".bold());
+        let title_text = match self.mode {
+            AppMode::Pomodoro => " Pomodoro ",
+            AppMode::CountUpTimer => " Count-Up Timer ",
+        };
+
+        let title = text::Line::from(title_text.bold());
         let instructions = text::Line::from(vec![
             start_pause.into(),
             "<S>".blue().bold(),
@@ -195,9 +314,15 @@ impl App {
     }
 
     fn get_ascii_image_widget(&self) -> widgets::Paragraph<'_> {
-        let ascii_image: Vec<text::Line> = match self.pomo.state() {
-            pomodoro_tui::PomodoroState::Work => ascii_images::computer(),
-            pomodoro_tui::PomodoroState::Break => ascii_images::sleeping_cat(),
+        let ascii_image: Vec<text::Line> = match self.mode {
+            AppMode::Pomodoro => match self.pomo.state() {
+                pomodoro_tui::PomodoroState::Work => ascii_images::computer(),
+                pomodoro_tui::PomodoroState::Break => ascii_images::sleeping_cat(),
+            },
+            AppMode::CountUpTimer => match self.count_up_state {
+                CountUpState::Work => ascii_images::computer(),
+                CountUpState::Break => ascii_images::sleeping_cat(),
+            },
         }
         .into_iter()
         .map(text::Line::from)
@@ -232,10 +357,18 @@ impl App {
             // Handle normal app keys
             match key_event.code {
                 event::KeyCode::Char('s') => {
-                    self.pomo.start_or_pause();
+                    self.start_or_pause();
                 }
                 event::KeyCode::Char('r') => {
-                    self.pomo.reset();
+                    match self.mode {
+                        AppMode::Pomodoro => self.pomo.reset(),
+                        AppMode::CountUpTimer => {
+                            // Reset both timers and go back to work state
+                            self.count_up_timer.reset();
+                            self.count_up_break_timer.reset();
+                            self.count_up_state = CountUpState::Work;
+                        }
+                    }
                 }
                 event::KeyCode::Char('c') => {
                     self.menu_state = MenuState::MainMenu;
@@ -257,7 +390,7 @@ impl App {
             }
             event::KeyCode::Down => {
                 let max_items = match self.menu_state {
-                    MenuState::MainMenu => 4, // 5 items (0-4)
+                    MenuState::MainMenu => 5, // 6 items (0-5): work duration, break duration, auto-start, sound, mode, back
                     MenuState::SelectWorkDuration | MenuState::SelectBreakDuration => {
                         DURATION_PRESETS.len() - 1
                     }
@@ -326,6 +459,14 @@ impl App {
                         self.menu_selection = 0;
                     }
                     4 => {
+                        // Switch Mode
+                        self.mode = match self.mode {
+                            AppMode::Pomodoro => AppMode::CountUpTimer,
+                            AppMode::CountUpTimer => AppMode::Pomodoro,
+                        };
+                        self.menu_state = MenuState::None;
+                    }
+                    5 => {
                         // Back
                         self.menu_state = MenuState::None;
                     }
@@ -384,11 +525,16 @@ impl App {
             MenuState::MainMenu => {
                 let auto_start_status = if self.pomo.auto_start() { "ON" } else { "OFF" };
                 let auto_start_label = format!("Toggle Auto-Start ({})", auto_start_status);
+                let mode_label = match self.mode {
+                    AppMode::Pomodoro => "Switch to Count-Up Timer",
+                    AppMode::CountUpTimer => "Switch to Pomodoro",
+                };
                 let items = vec![
                     "Change Work Duration",
                     "Change Break Duration",
                     &auto_start_label,
                     "Change Notification Sound",
+                    mode_label,
                     "Back",
                 ];
                 self.render_menu_items(frame, popup_area, "Configuration Menu", &items);
@@ -482,9 +628,10 @@ impl App {
     }
 
     fn get_sound_files(&self) -> Vec<PathBuf> {
-        let sounds_dir = Path::new("sounds");
         let mut sound_files = Vec::new();
 
+        // Check local sounds directory
+        let sounds_dir = Path::new("sounds");
         if let Ok(entries) = fs::read_dir(sounds_dir) {
             for entry in entries.flatten() {
                 if let Ok(file_type) = entry.file_type() {
@@ -495,6 +642,27 @@ impl App {
                             let ext_str = ext.to_string_lossy().to_lowercase();
                             if ext_str == "mp3" || ext_str == "wav" || ext_str == "ogg" {
                                 sound_files.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check ~/Music/pomodoro-sounds/ directory
+        if let Some(home_dir) = std::env::var_os("HOME") {
+            let user_sounds_dir = PathBuf::from(home_dir).join("Music/pomodoro-sounds");
+            if let Ok(entries) = fs::read_dir(user_sounds_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(file_type) = entry.file_type() {
+                        if file_type.is_file() {
+                            let path = entry.path();
+                            // Check if it's an audio file (basic check by extension)
+                            if let Some(ext) = path.extension() {
+                                let ext_str = ext.to_string_lossy().to_lowercase();
+                                if ext_str == "mp3" || ext_str == "wav" || ext_str == "ogg" {
+                                    sound_files.push(path);
+                                }
                             }
                         }
                     }
