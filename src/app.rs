@@ -1,8 +1,9 @@
 use crate::ascii_images;
 use crossterm::event;
 use ratatui::{layout, style::Stylize, symbols, text, widgets, DefaultTerminal, Frame};
+use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time;
 
@@ -19,6 +20,8 @@ enum MenuState {
     MainMenu,
     SelectWorkDuration,
     SelectBreakDuration,
+    ExtendWorkSession,
+    SelectSound,
 }
 
 pub struct App {
@@ -61,7 +64,13 @@ impl App {
             terminal.draw(|frame| self.draw(frame))?;
             match self.rx.recv() {
                 Ok(Event::Key(key_event)) => self.handle_key_event(key_event),
-                Ok(Event::Tick) => self.pomo.check_and_switch(),
+                Ok(Event::Tick) => {
+                    let work_session_ended = self.pomo.check_and_switch();
+                    if work_session_ended {
+                        self.menu_state = MenuState::ExtendWorkSession;
+                        self.menu_selection = 0;
+                    }
+                }
                 _ => (),
             }
         }
@@ -248,9 +257,18 @@ impl App {
             }
             event::KeyCode::Down => {
                 let max_items = match self.menu_state {
-                    MenuState::MainMenu => 3, // 4 items (0-3)
+                    MenuState::MainMenu => 4, // 5 items (0-4)
                     MenuState::SelectWorkDuration | MenuState::SelectBreakDuration => {
                         DURATION_PRESETS.len() - 1
+                    }
+                    MenuState::ExtendWorkSession => DURATION_PRESETS.len(), // presets + "No, start break"
+                    MenuState::SelectSound => {
+                        let sound_count = self.get_sound_files().len();
+                        if sound_count > 0 {
+                            sound_count - 1
+                        } else {
+                            0
+                        }
                     }
                     MenuState::None => 0,
                 };
@@ -267,9 +285,14 @@ impl App {
                     MenuState::MainMenu => {
                         self.menu_state = MenuState::None;
                     }
-                    MenuState::SelectWorkDuration | MenuState::SelectBreakDuration => {
+                    MenuState::SelectWorkDuration | MenuState::SelectBreakDuration | MenuState::SelectSound => {
                         self.menu_state = MenuState::MainMenu;
                         self.menu_selection = 0;
+                    }
+                    MenuState::ExtendWorkSession => {
+                        // Esc means "start break"
+                        self.pomo.start_or_pause();
+                        self.menu_state = MenuState::None;
                     }
                     MenuState::None => {}
                 }
@@ -298,6 +321,11 @@ impl App {
                         // Stay in menu to show updated state
                     }
                     3 => {
+                        // Change Notification Sound
+                        self.menu_state = MenuState::SelectSound;
+                        self.menu_selection = 0;
+                    }
+                    4 => {
                         // Back
                         self.menu_state = MenuState::None;
                     }
@@ -316,6 +344,27 @@ impl App {
                 if self.menu_selection < DURATION_PRESETS.len() {
                     let duration = DURATION_PRESETS[self.menu_selection];
                     self.pomo.set_break_duration(duration);
+                    self.menu_state = MenuState::MainMenu;
+                    self.menu_selection = 0;
+                }
+            }
+            MenuState::ExtendWorkSession => {
+                if self.menu_selection < DURATION_PRESETS.len() {
+                    // Extend work session
+                    let duration = DURATION_PRESETS[self.menu_selection];
+                    self.pomo.extend_work_session(duration);
+                    self.menu_state = MenuState::None;
+                } else {
+                    // "No, start break" option selected
+                    self.pomo.start_or_pause();
+                    self.menu_state = MenuState::None;
+                }
+            }
+            MenuState::SelectSound => {
+                let sound_files = self.get_sound_files();
+                if !sound_files.is_empty() && self.menu_selection < sound_files.len() {
+                    let selected_sound = sound_files[self.menu_selection].clone();
+                    self.pomo.set_sound(selected_sound);
                     self.menu_state = MenuState::MainMenu;
                     self.menu_selection = 0;
                 }
@@ -339,6 +388,7 @@ impl App {
                     "Change Work Duration",
                     "Change Break Duration",
                     &auto_start_label,
+                    "Change Notification Sound",
                     "Back",
                 ];
                 self.render_menu_items(frame, popup_area, "Configuration Menu", &items);
@@ -355,6 +405,36 @@ impl App {
                     .collect();
                 let items_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
                 self.render_menu_items(frame, popup_area, title, &items_refs);
+            }
+            MenuState::ExtendWorkSession => {
+                let title = "Work Session Complete! Extend?";
+                let items: Vec<String> = DURATION_PRESETS
+                    .iter()
+                    .map(|d| format!("Extend {} minutes", d))
+                    .collect();
+                let mut items_with_break = items.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
+                items_with_break.push("No, start break");
+                self.render_menu_items(frame, popup_area, title, &items_with_break);
+            }
+            MenuState::SelectSound => {
+                let title = "Select Notification Sound";
+                let sound_files = self.get_sound_files();
+                let items: Vec<String> = sound_files
+                    .iter()
+                    .filter_map(|p| {
+                        p.file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect();
+
+                if items.is_empty() {
+                    let empty_items = vec!["No sound files found in sounds/"];
+                    self.render_menu_items(frame, popup_area, title, &empty_items);
+                } else {
+                    let items_refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+                    self.render_menu_items(frame, popup_area, title, &items_refs);
+                }
             }
             MenuState::None => {}
         }
@@ -399,5 +479,30 @@ impl App {
             layout::Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+    }
+
+    fn get_sound_files(&self) -> Vec<PathBuf> {
+        let sounds_dir = Path::new("sounds");
+        let mut sound_files = Vec::new();
+
+        if let Ok(entries) = fs::read_dir(sounds_dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_file() {
+                        let path = entry.path();
+                        // Check if it's an audio file (basic check by extension)
+                        if let Some(ext) = path.extension() {
+                            let ext_str = ext.to_string_lossy().to_lowercase();
+                            if ext_str == "mp3" || ext_str == "wav" || ext_str == "ogg" {
+                                sound_files.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        sound_files.sort();
+        sound_files
     }
 }

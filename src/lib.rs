@@ -156,19 +156,36 @@ impl Pomodoro {
         self.auto_start
     }
 
-    pub fn check_and_switch(&mut self) {
-        let (current_timer, next_timer, next_state, message) = match self.state {
+    pub fn extend_work_session(&mut self, minutes: u64) {
+        // Switch back to work state
+        self.state = PomodoroState::Work;
+        // Set the timer to the extension duration
+        self.work_timer.set_duration(minutes);
+        // Reset the timer to start fresh
+        self.work_timer.reset();
+        // Start the timer
+        self.work_timer.start_or_pause();
+    }
+
+    pub fn set_sound(&mut self, sound_path: PathBuf) {
+        self.sound = sound_path;
+    }
+
+    pub fn check_and_switch(&mut self) -> bool {
+        let (current_timer, next_timer, next_state, message, is_work_ending) = match self.state {
             PomodoroState::Work => (
                 &mut self.work_timer,
                 &mut self.break_timer,
                 PomodoroState::Break,
                 "It's time to have a break.",
+                true,
             ),
             PomodoroState::Break => (
                 &mut self.break_timer,
                 &mut self.work_timer,
                 PomodoroState::Work,
                 "It's time to research.",
+                false,
             ),
         };
 
@@ -179,7 +196,9 @@ impl Pomodoro {
             }
             self.state = next_state;
             show_notification("Pomodoro Timer", message, &self.sound, &self.no_sound);
+            return is_work_ending && !self.auto_start;
         }
+        false
     }
 }
 
